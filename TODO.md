@@ -1,1 +1,5 @@
-- Use /etc/hostname for hostname
+- Add cli:
+  - build
+  - diff
+  - upgrade
+- Allow addressing individual managers

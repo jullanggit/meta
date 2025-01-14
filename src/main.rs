@@ -90,10 +90,8 @@ fn load_managers() -> HashMap<String, Manager> {
 /// Loads the config items for each manager
 fn load_configs(managers: &mut HashMap<String, Manager>) {
     // Start at the current machine's config file
-    let hostname = hostname::get()
-        .expect("Failed to get hostname")
-        .into_string()
-        .expect("Hostname should be valid UTF-8");
+    let hostname = fs::read_to_string("/etc/hostname").expect("Failed to get hostname");
+    let hostname = hostname.trim();
 
     // The list of configs that should be parsed, gets continually extended when a new config file is imported
     // Paths are evaluated relative to CONFIG_PATH/configs/ and are appended with .toml
