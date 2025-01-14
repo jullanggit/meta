@@ -1,6 +1,13 @@
 #![feature(strict_overflow_ops)]
 
-use colored::Colorize;
+mod cli;
+
+use clap::Parser as _;
+use cli::{
+    Cli,
+    Commands::{Build, Diff, Upgrade},
+};
+use colored::Colorize as _;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -13,8 +20,6 @@ use std::{
     sync::LazyLock,
 };
 use toml::Table;
-
-mod cli;
 
 static CONFIG_PATH: LazyLock<String> = LazyLock::new(|| {
     let home = env::var("HOME").expect("HOME is not set");
@@ -46,18 +51,26 @@ struct Manager {
 }
 
 fn main() {
+    let cli = Cli::parse();
+
     let mut managers = load_managers();
+    match cli.command {
+        Build | Diff => {
+            load_configs(&mut managers);
 
-    load_configs(&mut managers);
+            compute_add_remove(&mut managers);
 
-    compute_add_remove(&mut managers);
+            print_diff(&managers);
 
-    print_diff(&managers);
-    if !ask_for_confirmation() {
-        return;
-    };
-
-    add_remove_items(&managers);
+            if cli.command == Build {
+                if !ask_for_confirmation() {
+                    return;
+                };
+                add_remove_items(&managers);
+            }
+        }
+        Upgrade => upgrade(&managers),
+    }
 }
 
 fn load_managers() -> HashMap<String, Manager> {
@@ -251,6 +264,18 @@ fn run_command(command: String) {
 /// Adds/removes all items in `to_add`/`to_remove`.
 /// Respects `manager_order`
 fn add_remove_items(managers: &HashMap<String, Manager>) {
+    let ordered_managers = ordered_managers(managers);
+
+    for manager in ordered_managers {
+        // Add new items
+        fmt_run_command(&manager.add, &manager.items_to_add);
+        // Remove old items
+        fmt_run_command(&manager.remove, &manager.items_to_remove);
+    }
+}
+
+/// Returns the managers in the order specified in `manager_order`
+fn ordered_managers(managers: &HashMap<String, Manager>) -> Vec<&Manager> {
     let manager_order = fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
         .expect("Failed to read manager order");
     let ordered_managers = manager_order.lines();
@@ -260,12 +285,17 @@ fn add_remove_items(managers: &HashMap<String, Manager>) {
         exit(1);
     }
 
-    for manager in ordered_managers
+    ordered_managers
         .map(|manager_name| managers.get(manager_name).expect("Failed to get manager"))
-    {
-        // Add new items
-        fmt_run_command(&manager.add, &manager.items_to_add);
-        // Remove old items
-        fmt_run_command(&manager.remove, &manager.items_to_remove);
+        .collect()
+}
+
+fn upgrade(managers: &HashMap<String, Manager>) {
+    let ordered_managers = ordered_managers(managers);
+
+    for manager in ordered_managers {
+        if let Some(upgrade_command) = manager.upgrade.clone() {
+            run_command(upgrade_command);
+        }
     }
 }

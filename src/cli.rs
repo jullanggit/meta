@@ -4,11 +4,15 @@ use clap::{Parser, Subcommand};
 #[command(version, about)]
 pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, PartialEq)]
 pub enum Commands {
-    // Build the current configuration
+    /// Build the current configuration
     Build,
+    /// Print the difference between the system and the config
+    Diff,
+    /// Upgrade all managers
+    Upgrade,
 }
