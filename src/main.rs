@@ -286,7 +286,11 @@ fn ordered_managers(managers: &HashMap<String, Manager>) -> Vec<&Manager> {
     }
 
     ordered_managers
-        .map(|manager_name| managers.get(manager_name).expect("Failed to get manager"))
+        .map(|manager_name| {
+            managers
+                .get(manager_name)
+                .unwrap_or_else(|| panic!("Failed to get manager: {manager_name}"))
+        })
         .collect()
 }
 
