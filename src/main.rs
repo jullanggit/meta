@@ -63,10 +63,19 @@ fn main() {
             print_diff(&managers);
 
             if cli.command == Build {
-                if !ask_for_confirmation() {
+                // If there is anything to do
+                if managers.values().any(|manager| {
+                    !manager.items_to_add.is_empty() || !manager.items_to_remove.is_empty()
+                }) {
+                    // Ask for confirmation
+                    if !ask_for_confirmation() {
+                        return;
+                    };
+                    add_remove_items(&managers);
+                } else {
+                    println!("Nothing to do.");
                     return;
-                };
-                add_remove_items(&managers);
+                }
             }
         }
         Upgrade => upgrade(&managers),
