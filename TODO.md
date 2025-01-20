@@ -1,5 +1,1 @@
-- Add cli:
-  - build
-  - diff
-  - upgrade
-- Allow addressing individual managers
+

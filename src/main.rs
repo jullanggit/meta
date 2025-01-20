@@ -292,10 +292,14 @@ fn add_remove_items(managers: &HashMap<String, Manager>) {
     let ordered_managers = ordered_managers(managers);
 
     for manager in ordered_managers {
-        // Add new items
-        fmt_run_command(&manager.add, &manager.items_to_add);
-        // Remove old items
-        fmt_run_command(&manager.remove, &manager.items_to_remove);
+        if manager.items_to_add.len() > 0 {
+            // Add new items
+            fmt_run_command(&manager.add, &manager.items_to_add);
+        }
+        if manager.items_to_remove.len() > 0 {
+            // Remove old items
+            fmt_run_command(&manager.remove, &manager.items_to_remove);
+        }
     }
 }
 
