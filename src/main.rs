@@ -53,7 +53,7 @@ struct Manager {
 fn main() {
     let cli = Cli::parse();
 
-    let mut managers = load_managers();
+    let mut managers = load_managers(cli.managers);
     match cli.command {
         Build | Diff => {
             load_configs(&mut managers);
@@ -73,14 +73,30 @@ fn main() {
     }
 }
 
-fn load_managers() -> HashMap<String, Manager> {
+fn load_managers(managers_to_load: Option<Vec<String>>) -> HashMap<String, Manager> {
     let manager_path = PathBuf::from(format!("{}/managers", *CONFIG_PATH));
 
-    manager_path
+    let managers: HashMap<String, Manager> = manager_path
         .read_dir()
         .expect("Failed to read manager dir")
         .flatten() // Ignore Err() Results
-        .filter(|file| file.path().extension() == Some(OsStr::new("toml")))
+        .filter(|file| file.path().extension() == Some(OsStr::new("toml"))) // Only consider toml files
+        // If --managers is given, only load the given managers
+        .filter(|file| {
+            if let Some(managers) = &managers_to_load {
+                managers.contains(
+                    &file
+                        .file_name()
+                        .to_str()
+                        .expect("Failed to get manager name")
+                        .strip_suffix(".toml")
+                        .expect("File should be a toml")
+                        .into(),
+                )
+            } else {
+                true
+            }
+        })
         .map(|manager_file| {
             let manager_string =
                 fs::read_to_string(manager_file.path()).expect("Failed to read manager file");
@@ -97,7 +113,18 @@ fn load_managers() -> HashMap<String, Manager> {
 
             (name, manager)
         })
-        .collect()
+        .collect();
+
+    // Assert that all requested managers were found
+    assert!(
+        managers_to_load
+            .into_iter()
+            .flat_map(|vec| vec.into_iter())
+            .all(|manager_to_load| { managers.contains_key(&manager_to_load) }),
+        "Requested Manager not found"
+    );
+
+    managers
 }
 
 /// Loads the config items for each manager
@@ -144,11 +171,9 @@ fn load_configs(managers: &mut HashMap<String, Manager>) {
                         }
                     } else {
                         // Add the items to the manager
-                        managers
-                            .get_mut(&manager_name)
-                            .expect("Manager should exist")
-                            .items
-                            .insert(item.into());
+                        if let Some(manager) = managers.get_mut(&manager_name) {
+                            manager.items.insert(item.into());
+                        }
                     }
                 });
         }
@@ -286,11 +311,7 @@ fn ordered_managers(managers: &HashMap<String, Manager>) -> Vec<&Manager> {
     }
 
     ordered_managers
-        .map(|manager_name| {
-            managers
-                .get(manager_name)
-                .unwrap_or_else(|| panic!("Failed to get manager: {manager_name}"))
-        })
+        .filter_map(|manager_name| managers.get(manager_name))
         .collect()
 }
 
