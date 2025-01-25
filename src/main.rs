@@ -264,16 +264,21 @@ fn print_diff(managers: &HashMap<String, Manager>) {
 
 /// Asks the user for confirmation. Returns the users answer
 fn ask_for_confirmation() -> anyhow::Result<bool> {
-    println!("{}", "Continue?".bold());
-
     let mut buf = String::new();
 
-    stdin().read_line(&mut buf).context("Failed to get input")?;
+    loop {
+        buf.clear();
 
-    Ok(match buf.trim() {
-        "y" | "Y" | "" => true, // newline is defaulted to y
-        _ => false,
-    })
+        println!("{}", "Continue?".bold());
+
+        stdin().read_line(&mut buf).context("Failed to get input")?;
+
+        match buf.trim() {
+            "y" | "Y" | "yes" | "" => return Ok(true), // newline is defaulted to y
+            "n" | "N" | "no" => return Ok(false),
+            _ => eprintln!("Please answer with either y or n"),
+        }
+    }
 }
 
 /// Takes a formatted command (containing <item> or <items>) and runs it with the provided items
