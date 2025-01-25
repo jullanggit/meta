@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version, about)]
+#[command(infer_subcommands = true)]
 pub struct Cli {
     #[arg(long, short)]
     /// The managers to run the command for
