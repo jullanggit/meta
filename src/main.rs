@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Upgrade => upgrade(&managers),
+        Upgrade => upgrade(&managers).context("Failed to upgrade managers"),
     }
 }
 
@@ -120,23 +120,23 @@ fn load_managers(
         // Load manager
         .map(|(file, name)| {
             let manager_string = fs::read_to_string(file.path()).with_context(|| {
-                format!("Failed to read manager file {}", file.path().display())
+                format!("Failed to read manager file '{}'", file.path().display())
             })?;
             let manager: Manager = toml::from_str(&manager_string)
-                .with_context(|| format!("Failed to deserialize manager {name}"))?;
+                .with_context(|| format!("Failed to deserialize manager '{name}'"))?;
 
             Ok((name, manager))
         })
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
     // Assert that all requested managers were found
-    assert!(
-        managers_to_load
-            .into_iter()
-            .flat_map(IntoIterator::into_iter)
-            .all(|manager_to_load| { managers.contains_key(&manager_to_load) }),
-        "Requested Manager not found"
-    );
+    if let Some(managers_to_load) = managers_to_load {
+        for manager_to_load in managers_to_load {
+            if !managers.contains_key(&manager_to_load) {
+                return Err(anyhow!("Requested Manager not found"));
+            }
+        }
+    }
 
     Ok(managers)
 }
@@ -158,11 +158,11 @@ fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
 
         // Load the config file
         let config_string = fs::read_to_string(config_file)
-            .with_context(|| "Failed to read config file {config_file}")?;
+            .with_context(|| "Failed to read config file '{config_file}'")?;
 
         // Deserialize it
         let config_table: Table = toml::from_str(&config_string)
-            .with_context(|| "Failed to deserialize config {config_file}")?;
+            .with_context(|| "Failed to deserialize config '{config_file}'")?;
 
         for (manager_name, value) in config_table {
             // Create an iterator over the items of the entry
@@ -177,7 +177,7 @@ fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
                     // Convert item to string
                     let item = value
                         .as_str()
-                        .with_context(|| "Found non-string item {item}")?;
+                        .with_context(|| "Found non-string item '{item}'")?;
 
                     // Didnt find a way to push this up without code duplication
                     if manager_name == "imports" {
@@ -206,25 +206,22 @@ fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
 fn compute_add_remove(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
     for (manager_name, manager) in managers {
         // Get system items
-        let output = Command::new("fish").arg("-c").arg(&manager.list).output(); // TODO: Add setting for which shell to use
+        let output = Command::new("fish") // TODO: Add setting for which shell to use
+            .arg("-c")
+            .arg(&manager.list)
+            .output()
+            .with_context(|| {
+                format!("Failed to execute command 'list' for manager '{manager_name}'")
+            })?;
 
-        let system_items = match output {
-            Ok(output) => {
-                if output.status.success() {
-                    String::from_utf8(output.stdout)
-                        .context("Failed to convert command output to String")?
-                } else {
-                    eprintln!(
-                        "Command 'list' for manager {manager_name} failed with error: \n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                    exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to execute command 'list': {e}");
-                exit(1);
-            }
+        let system_items = if output.status.success() {
+            String::from_utf8(output.stdout)
+                .context("Failed to convert command output to String")?
+        } else {
+            return Err(anyhow!(format!(
+                "Command 'list' for manager '{manager_name}' failed with stderr: \n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         };
 
         let system_items = system_items
@@ -281,7 +278,7 @@ fn ask_for_confirmation() -> anyhow::Result<bool> {
     }
 }
 
-/// Takes a formatted command (containing <item> or <items>) and runs it with the provided items
+/// Takes a format command (containing <item> or <items>) and runs it with the provided items
 fn fmt_run_command(
     format_command: &str,
     items: &[String],
@@ -312,13 +309,13 @@ fn run_command(command: String) -> anyhow::Result<()> {
         .arg("-c")
         .arg(&command)
         .status()
-        .context("Failed to spawn child command")?;
+        .with_context(|| format!("Failed to spawn child command '{command}'"))?;
 
     if status.success() {
         Ok(())
     } else {
         Err(anyhow!(format!(
-            "Command {command} did not exit successfully"
+            "Command '{command}' did not exit successfully"
         )))
     }
 }
@@ -326,7 +323,7 @@ fn run_command(command: String) -> anyhow::Result<()> {
 /// Adds/removes all items in `to_add`/`to_remove`.
 /// Respects `manager_order`
 fn add_remove_items(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
-    let ordered_managers = ordered_managers(managers).context("Failed order managers")?;
+    let ordered_managers = ordered_managers(managers).context("Failed to order managers")?;
 
     for manager in ordered_managers {
         // Add & remove operations
@@ -344,7 +341,7 @@ fn add_remove_items(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
             if !items.is_empty() {
                 let items_separator = manager.items_separator.as_deref().unwrap_or(" ");
                 fmt_run_command(format_command, items, items_separator)
-                    .with_context(|| format!("Failed to run fmt command {format_command} on with items {items:?} and separator {items_separator}"))?;
+                    .with_context(|| format!("Failed to run fmt command '{format_command}'"))?;
             }
         }
     }
@@ -362,7 +359,9 @@ fn ordered_managers(managers: &HashMap<String, Manager>) -> anyhow::Result<Vec<&
         if ordered_managers.contains(&manager_name.as_str()) {
             Ok(())
         } else {
-            Err(anyhow!("Manager {manager_name} missing from manager_order"))
+            Err(anyhow!(
+                "Manager '{manager_name}' missing from manager_order"
+            ))
         }
     })?;
 
@@ -373,7 +372,7 @@ fn ordered_managers(managers: &HashMap<String, Manager>) -> anyhow::Result<Vec<&
 }
 
 fn upgrade(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
-    let ordered_managers = ordered_managers(managers).context("Failed order managers")?;
+    let ordered_managers = ordered_managers(managers).context("Failed to order managers")?;
 
     for manager in ordered_managers {
         if let Some(upgrade_command) = manager.upgrade.clone() {
