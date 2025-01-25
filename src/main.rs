@@ -1,8 +1,9 @@
 #![feature(strict_overflow_ops)]
-#![feature(concat_idents)]
+#![feature(iterator_try_collect)]
 
 mod cli;
 
+use anyhow::{Context as _, anyhow};
 use clap::Parser as _;
 use cli::{
     Cli,
@@ -12,9 +13,7 @@ use colored::Colorize as _;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    ffi::OsStr,
-    fs,
+    env, fs,
     io::stdin,
     path::PathBuf,
     process::{Command, exit},
@@ -22,6 +21,7 @@ use std::{
 };
 use toml::Table;
 
+#[expect(clippy::expect_used)]
 static CONFIG_PATH: LazyLock<String> = LazyLock::new(|| {
     let home = env::var("HOME").expect("HOME is not set");
     format!("{home}/.config/meta")
@@ -59,15 +59,15 @@ struct Manager {
     items_to_remove: Vec<String>,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let mut managers = load_managers(cli.managers);
+    let mut managers = load_managers(cli.managers).context("Failed to load managers")?;
     match cli.command {
         Build | Diff => {
-            load_configs(&mut managers);
+            load_configs(&mut managers).context("Failed to load configs")?;
 
-            compute_add_remove(&mut managers);
+            compute_add_remove(&mut managers).context("Failed to compute add/remove")?;
 
             print_diff(&managers);
 
@@ -77,58 +77,57 @@ fn main() {
                     !manager.items_to_add.is_empty() || !manager.items_to_remove.is_empty()
                 }) {
                     // Ask for confirmation
-                    if !ask_for_confirmation() {
-                        return;
+                    if !ask_for_confirmation().context("Failed to ask for confirmation")? {
+                        exit(1);
                     };
-                    add_remove_items(&managers);
+                    add_remove_items(&managers).context("Failed to add/remove items")?;
                 } else {
                     println!("Nothing to do.");
                 }
             }
+            Ok(())
         }
         Upgrade => upgrade(&managers),
     }
 }
 
-fn load_managers(managers_to_load: Option<Vec<String>>) -> HashMap<String, Manager> {
+fn load_managers(
+    managers_to_load: Option<Vec<String>>,
+) -> anyhow::Result<HashMap<String, Manager>> {
     let manager_path = PathBuf::from(format!("{}/managers", *CONFIG_PATH));
 
-    let managers: HashMap<String, Manager> = manager_path
+    let managers = manager_path
         .read_dir()
-        .expect("Failed to read manager dir")
+        .context("Failed to read manager dir")?
         .flatten() // Ignore Err() Results
-        .filter(|file| file.path().extension() == Some(OsStr::new("toml"))) // Only consider toml files
-        // If --managers is given, only load the given managers
-        .filter(|file| {
-            managers_to_load.as_ref().is_none_or(|managers| {
-                managers.contains(
-                    &file
-                        .file_name()
-                        .to_str()
-                        .expect("Failed to get manager name")
-                        .strip_suffix(".toml")
-                        .expect("File should be a toml")
-                        .into(),
-                )
+        // Get manager name & filter out non-toml files
+        .filter_map(|file| {
+            file.file_name().to_str().and_then(|file_name| {
+                file_name
+                    .strip_suffix(".toml")
+                    .map(|name| (file, name.to_owned()))
             })
         })
-        .map(|manager_file| {
-            let manager_string =
-                fs::read_to_string(manager_file.path()).expect("Failed to read manager file");
-            let manager: Manager =
-                toml::from_str(&manager_string).expect("Failed to deserialize manager");
+        // If --managers is given, only load the given managers
+        .filter(
+            #[expect(clippy::pattern_type_mismatch)] // Cant seem to get this lint away
+            |(_, name)| {
+                managers_to_load
+                    .as_ref()
+                    .is_none_or(|managers| managers.contains(name))
+            },
+        )
+        // Load manager
+        .map(|(file, name)| {
+            let manager_string = fs::read_to_string(file.path()).with_context(|| {
+                format!("Failed to read manager file {}", file.path().display())
+            })?;
+            let manager: Manager = toml::from_str(&manager_string)
+                .with_context(|| format!("Failed to deserialize manager {name}"))?;
 
-            let name = manager_file
-                .file_name()
-                .to_str()
-                .expect("Failed to get manager name")
-                .strip_suffix(".toml")
-                .expect("File should be a toml")
-                .into();
-
-            (name, manager)
+            Ok((name, manager))
         })
-        .collect();
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
     // Assert that all requested managers were found
     assert!(
@@ -139,13 +138,13 @@ fn load_managers(managers_to_load: Option<Vec<String>>) -> HashMap<String, Manag
         "Requested Manager not found"
     );
 
-    managers
+    Ok(managers)
 }
 
 /// Loads the config items for each manager
-fn load_configs(managers: &mut HashMap<String, Manager>) {
+fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
     // Start at the current machine's config file
-    let hostname = fs::read_to_string("/etc/hostname").expect("Failed to get hostname");
+    let hostname = fs::read_to_string("/etc/hostname").context("Failed to get hostname")?;
     let hostname = hostname.trim();
 
     // The list of configs that should be parsed, gets continually extended when a new config file is imported
@@ -158,11 +157,12 @@ fn load_configs(managers: &mut HashMap<String, Manager>) {
         let config_file = format!("{}/configs/{config_file}.toml", *CONFIG_PATH);
 
         // Load the config file
-        let config_string = fs::read_to_string(config_file).expect("Config file should exist");
+        let config_string = fs::read_to_string(config_file)
+            .with_context(|| "Failed to read config file {config_file}")?;
 
         // Deserialize it
-        let config_table: Table =
-            toml::from_str(&config_string).expect("Failed to deserialize config");
+        let config_table: Table = toml::from_str(&config_string)
+            .with_context(|| "Failed to deserialize config {config_file}")?;
 
         for (manager_name, value) in config_table {
             // Create an iterator over the items of the entry
@@ -170,16 +170,18 @@ fn load_configs(managers: &mut HashMap<String, Manager>) {
                 // Both arrays...
                 .as_array()
                 .into_iter()
-                .flat_map(|vec| {
-                    vec.iter()
-                        .map(|value| value.as_str().expect("Item should be a string"))
-                })
+                .flatten()
                 // ...and single-value items are allowed
-                .chain(value.as_str().into_iter())
-                .for_each(|item| {
+                .chain([&value])
+                .try_for_each(|value| {
+                    // Convert item to string
+                    let item = value
+                        .as_str()
+                        .with_context(|| "Found non-string item {item}")?;
+
                     // Didnt find a way to push this up without code duplication
                     if manager_name == "imports" {
-                        let item = item.into();
+                        let item = item.to_owned();
                         // Avoid infinite loop when two configs import each other
                         if !configs_to_parse.contains(&item) {
                             configs_to_parse.push(item);
@@ -190,15 +192,18 @@ fn load_configs(managers: &mut HashMap<String, Manager>) {
                             manager.items.insert(item.into());
                         }
                     }
-                });
+
+                    Ok::<_, anyhow::Error>(())
+                })?;
         }
 
         i = i.strict_add(1); // i += 1
     }
+    Ok(())
 }
 
 /// Computes and prints the items to add and remove for each manager
-fn compute_add_remove(managers: &mut HashMap<String, Manager>) {
+fn compute_add_remove(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
     for (manager_name, manager) in managers {
         // Get system items
         let output = Command::new("fish").arg("-c").arg(&manager.list).output(); // TODO: Add setting for which shell to use
@@ -206,7 +211,8 @@ fn compute_add_remove(managers: &mut HashMap<String, Manager>) {
         let system_items = match output {
             Ok(output) => {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).expect("Command output should be UTF-8")
+                    String::from_utf8(output.stdout)
+                        .context("Failed to convert command output to String")?
                 } else {
                     eprintln!(
                         "Command 'list' for manager {manager_name} failed with error: \n{}",
@@ -237,6 +243,7 @@ fn compute_add_remove(managers: &mut HashMap<String, Manager>) {
             .map(Clone::clone)
             .collect();
     }
+    Ok(())
 }
 
 /// Prints all items to remove/add
@@ -256,56 +263,65 @@ fn print_diff(managers: &HashMap<String, Manager>) {
 }
 
 /// Asks the user for confirmation. Returns the users answer
-fn ask_for_confirmation() -> bool {
+fn ask_for_confirmation() -> anyhow::Result<bool> {
     println!("{}", "Continue?".bold());
 
     let mut buf = String::new();
 
-    stdin().read_line(&mut buf).expect("Failed to get input");
+    stdin().read_line(&mut buf).context("Failed to get input")?;
 
-    match buf.trim() {
+    Ok(match buf.trim() {
         "y" | "Y" | "" => true, // newline is defaulted to y
         _ => false,
-    }
+    })
 }
 
 /// Takes a formatted command (containing <item> or <items>) and runs it with the provided items
-fn fmt_run_command(format_command: &str, items: &[String], items_separator: Option<&str>) {
+fn fmt_run_command(
+    format_command: &str,
+    items: &[String],
+    items_separator: &str,
+) -> anyhow::Result<()> {
     // Only add one item at a time
     if format_command.contains("<item>") {
         items
             .iter()
             .map(|item| format_command.replace("<item>", item))
-            .for_each(run_command);
+            .try_for_each(run_command)
     // Add all items at once
     } else if format_command.contains("<items>") {
-        let items = items.join(items_separator.unwrap_or(" "));
+        let items = items.join(items_separator);
         let command = format_command.replace("<items>", &items);
-        run_command(command);
+        run_command(command)
     } else {
-        eprintln!("Add command should contain either <item> or <items>");
-        exit(1);
-    };
+        Err(anyhow!(
+            "Add command should contain either <item> or <items>"
+        ))
+    }
 }
 
 /// Runs the given command using the shell
-fn run_command(command: String) {
+#[expect(clippy::needless_pass_by_value)] // Makes for some nice closures
+fn run_command(command: String) -> anyhow::Result<()> {
     let status = Command::new("fish")
         .arg("-c")
-        .arg(command)
+        .arg(&command)
         .status()
-        .expect("Failed to spawn child");
+        .context("Failed to spawn child command")?;
 
-    if !status.success() {
-        eprintln!("Command did not exit successfully");
-        exit(1);
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(format!(
+            "Command {command} did not exit successfully"
+        )))
     }
 }
 
 /// Adds/removes all items in `to_add`/`to_remove`.
 /// Respects `manager_order`
-fn add_remove_items(managers: &HashMap<String, Manager>) {
-    let ordered_managers = ordered_managers(managers);
+fn add_remove_items(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
+    let ordered_managers = ordered_managers(managers).context("Failed order managers")?;
 
     for manager in ordered_managers {
         // Add & remove operations
@@ -321,34 +337,43 @@ fn add_remove_items(managers: &HashMap<String, Manager>) {
         // Run operations
         for (format_command, items) in operations {
             if !items.is_empty() {
-                fmt_run_command(format_command, items, manager.items_separator.as_deref());
+                let items_separator = manager.items_separator.as_deref().unwrap_or(" ");
+                fmt_run_command(format_command, items, items_separator)
+                    .with_context(|| format!("Failed to run fmt command {format_command} on with items {items:?} and separator {items_separator}"))?;
             }
         }
     }
+    Ok(())
 }
 
-/// Returns the managers in the order specified in `manager_order`
-fn ordered_managers(managers: &HashMap<String, Manager>) -> Vec<&Manager> {
+/// Returns the given managers in the order specified in `manager_order`
+fn ordered_managers(managers: &HashMap<String, Manager>) -> anyhow::Result<Vec<&Manager>> {
     let manager_order = fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
-        .expect("Failed to read manager order");
-    let ordered_managers = manager_order.lines();
+        .context("Failed to read manager order")?;
+    let ordered_managers: Vec<_> = manager_order.lines().collect();
 
-    if !ordered_managers.clone().count() == managers.len() {
-        eprintln!("Manager missing from manager_order"); // TODO: Maybe report which one
-        exit(1);
-    }
+    // Assert that all given managers are actually in the manager_order
+    managers.keys().try_for_each(|manager_name| {
+        if ordered_managers.contains(&manager_name.as_str()) {
+            Ok(())
+        } else {
+            Err(anyhow!("Manager {manager_name} missing from manager_order"))
+        }
+    })?;
 
-    ordered_managers
+    Ok(ordered_managers
+        .into_iter()
         .filter_map(|manager_name| managers.get(manager_name))
-        .collect()
+        .collect())
 }
 
-fn upgrade(managers: &HashMap<String, Manager>) {
-    let ordered_managers = ordered_managers(managers);
+fn upgrade(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
+    let ordered_managers = ordered_managers(managers).context("Failed order managers")?;
 
     for manager in ordered_managers {
         if let Some(upgrade_command) = manager.upgrade.clone() {
-            run_command(upgrade_command);
+            run_command(upgrade_command)?;
         }
     }
+    Ok(())
 }

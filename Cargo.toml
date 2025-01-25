@@ -10,6 +10,7 @@ categories = ["command-line-utilities", "config"]
 keywords = ["package-management"]
 
 [dependencies]
+anyhow = "1.0.95"
 clap = { version = "4.5.23", features = ["derive"] }
 colored = "3.0.0"
 serde = { version = "1.0.217", features = ["derive"] }
@@ -22,6 +23,8 @@ nursery = "warn"
 pedantic = "warn"
 
 derive_partial_eq_without_eq = { level = "allow", priority = 1 } # Dont always want eq on enums
+
+expect_used = "warn"
 
 # Restrict
 # absolute_paths = "warn"
