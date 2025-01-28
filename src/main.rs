@@ -12,7 +12,7 @@ use cli::{
 use colored::Colorize as _;
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     env, fs,
     io::stdin,
     path::PathBuf,
@@ -75,7 +75,7 @@ fn main() -> anyhow::Result<()> {
 
             if cli.command == Build {
                 // If there is anything to do
-                if managers.into_iter().any(|manager| {
+                if managers.iter().any(|manager| {
                     !manager.items_to_add.is_empty() || !manager.items_to_remove.is_empty()
                 }) {
                     // Ask for confirmation
@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
 fn load_managers(managers_to_load: Option<Vec<String>>) -> anyhow::Result<Vec<Manager>> {
     let manager_path = PathBuf::from(format!("{}/managers", *CONFIG_PATH));
 
-    let managers = manager_path
+    let mut managers = manager_path
         .read_dir()
         .context("Failed to read manager dir")?
         .flatten() // Ignore Err() Results
@@ -130,22 +130,24 @@ fn load_managers(managers_to_load: Option<Vec<String>>) -> anyhow::Result<Vec<Ma
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let manager_order: Hashmap<String, usize> =
-        fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
-            .context("Failed to read manager order")?
-            .lines()
-            .enumerate()
-            .collect();
+    let manager_order: Vec<String> = fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
+        .context("Failed to read manager order")?
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect();
 
-    managers.sort_unstable_by_key(|manager| manager_order[manager.name]);
+    managers.sort_unstable_by_key(|manager| {
+        manager_order
+            .iter()
+            .position(|ordered_manager| *ordered_manager == manager.name)
+    });
 
     // Assert that all requested managers were found
     if let Some(managers_to_load) = managers_to_load {
         for manager_to_load in managers_to_load {
             if managers
                 .iter()
-                .find(|manager| manager.name == manager_to_load)
-                .is_none()
+                .any(|manager| manager.name == manager_to_load)
             {
                 return Err(anyhow!("Requested Manager not found"));
             }
@@ -186,12 +188,12 @@ fn load_configs(managers: &mut [Manager]) -> anyhow::Result<()> {
                 .into_iter()
                 .flatten()
                 // ...and single-value items are allowed
-                .chain([&value])
+                .chain(value.is_str().then_some(&value))
                 .try_for_each(|value| {
                     // Convert item to string
                     let item = value
                         .as_str()
-                        .with_context(|| "Found non-string item '{item}'")?;
+                        .with_context(|| format!("Found non-string item '{value:?}'"))?;
 
                     // Didnt find a way to push this up without code duplication
                     if manager_name == "imports" {
@@ -203,7 +205,7 @@ fn load_configs(managers: &mut [Manager]) -> anyhow::Result<()> {
                     } else {
                         // Add the items to the manager
                         if let Some(manager) = managers
-                            .into_iter()
+                            .iter_mut()
                             .find(|manager| manager.name == manager_name)
                         {
                             manager.items.insert(item.into());
@@ -324,11 +326,12 @@ fn fmt_run_command(
 }
 
 /// Runs the given command using the shell
-#[expect(clippy::needless_pass_by_value)] // Makes for some nice closures
-fn run_command(command: String) -> anyhow::Result<()> {
+fn run_command(command: impl AsRef<str>) -> anyhow::Result<()> {
+    let command = command.as_ref();
+
     let status = Command::new("fish")
         .arg("-c")
-        .arg(&command)
+        .arg(command)
         .status()
         .with_context(|| format!("Failed to spawn child command '{command}'"))?;
 
@@ -369,8 +372,10 @@ fn add_remove_items(managers: &[Manager]) -> anyhow::Result<()> {
 
 fn upgrade(managers: &[Manager]) -> anyhow::Result<()> {
     for manager in managers {
-        if let Some(upgrade_command) = manager.upgrade.clone() {
-            run_command(upgrade_command)?;
+        if let Some(ref upgrade_command) = manager.upgrade {
+            run_command(upgrade_command).with_context(|| {
+                format!("Failed to run upgrade command for manager {}", manager.name)
+            })?;
         }
     }
     Ok(())
