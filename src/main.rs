@@ -30,6 +30,8 @@ static CONFIG_PATH: LazyLock<String> = LazyLock::new(|| {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manager {
+    #[serde(default)]
+    name: String,
     /// Command for adding one/multiple item
     add: String,
     /// Command for adding an item
@@ -73,7 +75,7 @@ fn main() -> anyhow::Result<()> {
 
             if cli.command == Build {
                 // If there is anything to do
-                if managers.values().any(|manager| {
+                if managers.into_iter().any(|manager| {
                     !manager.items_to_add.is_empty() || !manager.items_to_remove.is_empty()
                 }) {
                     // Ask for confirmation
@@ -91,9 +93,7 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn load_managers(
-    managers_to_load: Option<Vec<String>>,
-) -> anyhow::Result<HashMap<String, Manager>> {
+fn load_managers(managers_to_load: Option<Vec<String>>) -> anyhow::Result<Vec<Manager>> {
     let manager_path = PathBuf::from(format!("{}/managers", *CONFIG_PATH));
 
     let managers = manager_path
@@ -122,17 +122,31 @@ fn load_managers(
             let manager_string = fs::read_to_string(file.path()).with_context(|| {
                 format!("Failed to read manager file '{}'", file.path().display())
             })?;
-            let manager: Manager = toml::from_str(&manager_string)
+            let mut manager: Manager = toml::from_str(&manager_string)
                 .with_context(|| format!("Failed to deserialize manager '{name}'"))?;
+            manager.name = name;
 
-            Ok((name, manager))
+            Ok(manager)
         })
-        .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let manager_order: Hashmap<String, usize> =
+        fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
+            .context("Failed to read manager order")?
+            .lines()
+            .enumerate()
+            .collect();
+
+    managers.sort_unstable_by_key(|manager| manager_order[manager.name]);
 
     // Assert that all requested managers were found
     if let Some(managers_to_load) = managers_to_load {
         for manager_to_load in managers_to_load {
-            if !managers.contains_key(&manager_to_load) {
+            if managers
+                .iter()
+                .find(|manager| manager.name == manager_to_load)
+                .is_none()
+            {
                 return Err(anyhow!("Requested Manager not found"));
             }
         }
@@ -142,7 +156,7 @@ fn load_managers(
 }
 
 /// Loads the config items for each manager
-fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
+fn load_configs(managers: &mut [Manager]) -> anyhow::Result<()> {
     // Start at the current machine's config file
     let hostname = fs::read_to_string("/etc/hostname").context("Failed to get hostname")?;
     let hostname = hostname.trim();
@@ -188,7 +202,10 @@ fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
                         }
                     } else {
                         // Add the items to the manager
-                        if let Some(manager) = managers.get_mut(&manager_name) {
+                        if let Some(manager) = managers
+                            .into_iter()
+                            .find(|manager| manager.name == manager_name)
+                        {
                             manager.items.insert(item.into());
                         }
                     }
@@ -203,15 +220,18 @@ fn load_configs(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
 }
 
 /// Computes and prints the items to add and remove for each manager
-fn compute_add_remove(managers: &mut HashMap<String, Manager>) -> anyhow::Result<()> {
-    for (manager_name, manager) in managers {
+fn compute_add_remove(managers: &mut [Manager]) -> anyhow::Result<()> {
+    for manager in managers {
         // Get system items
         let output = Command::new("fish") // TODO: Add setting for which shell to use
             .arg("-c")
             .arg(&manager.list)
             .output()
             .with_context(|| {
-                format!("Failed to execute command 'list' for manager '{manager_name}'")
+                format!(
+                    "Failed to execute command 'list' for manager '{}'",
+                    manager.name
+                )
             })?;
 
         let system_items = if output.status.success() {
@@ -219,7 +239,8 @@ fn compute_add_remove(managers: &mut HashMap<String, Manager>) -> anyhow::Result
                 .context("Failed to convert command output to String")?
         } else {
             return Err(anyhow!(format!(
-                "Command 'list' for manager '{manager_name}' failed with stderr: \n{}",
+                "Command 'list' for manager '{}' failed with stderr: \n{}",
+                manager.name,
                 String::from_utf8_lossy(&output.stderr)
             )));
         };
@@ -244,11 +265,11 @@ fn compute_add_remove(managers: &mut HashMap<String, Manager>) -> anyhow::Result
 }
 
 /// Prints all items to remove/add
-fn print_diff(managers: &HashMap<String, Manager>) {
-    for (manager_name, manager) in managers {
+fn print_diff(managers: &[Manager]) {
+    for manager in managers {
         // If are any items to add/remove
         if !manager.items_to_add.is_empty() | !manager.items_to_remove.is_empty() {
-            println!("{}:", manager_name.bold());
+            println!("{}:", manager.name.bold());
             for item_to_add in &manager.items_to_add {
                 println!("{}", item_to_add.green());
             }
@@ -322,10 +343,8 @@ fn run_command(command: String) -> anyhow::Result<()> {
 
 /// Adds/removes all items in `to_add`/`to_remove`.
 /// Respects `manager_order`
-fn add_remove_items(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
-    let ordered_managers = ordered_managers(managers).context("Failed to order managers")?;
-
-    for manager in ordered_managers {
+fn add_remove_items(managers: &[Manager]) -> anyhow::Result<()> {
+    for manager in managers {
         // Add & remove operations
         let mut operations = [
             (&manager.add, &manager.items_to_add),
@@ -348,33 +367,8 @@ fn add_remove_items(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns the given managers in the order specified in `manager_order`
-fn ordered_managers(managers: &HashMap<String, Manager>) -> anyhow::Result<Vec<&Manager>> {
-    let manager_order = fs::read_to_string(format!("{}/manager_order", *CONFIG_PATH))
-        .context("Failed to read manager order")?;
-    let ordered_managers: Vec<_> = manager_order.lines().collect();
-
-    // Assert that all given managers are actually in the manager_order
-    managers.keys().try_for_each(|manager_name| {
-        if ordered_managers.contains(&manager_name.as_str()) {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "Manager '{manager_name}' missing from manager_order"
-            ))
-        }
-    })?;
-
-    Ok(ordered_managers
-        .into_iter()
-        .filter_map(|manager_name| managers.get(manager_name))
-        .collect())
-}
-
-fn upgrade(managers: &HashMap<String, Manager>) -> anyhow::Result<()> {
-    let ordered_managers = ordered_managers(managers).context("Failed to order managers")?;
-
-    for manager in ordered_managers {
+fn upgrade(managers: &[Manager]) -> anyhow::Result<()> {
+    for manager in managers {
         if let Some(upgrade_command) = manager.upgrade.clone() {
             run_command(upgrade_command)?;
         }
